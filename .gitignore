@@ -1,0 +1,20 @@
+# IDE / editor
+.vscode/
+
+# Node / frontend artifacts (if any inside backend)
+node_modules/
+
+# Test / coverage artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+test-results/
+blob-report/
+.playwright-report/
+.playwright/.cache/
+
+# Python cache / build artifacts (backend specific)
+__pycache__/
+*.pyc
+app.egg-info
+.venv/

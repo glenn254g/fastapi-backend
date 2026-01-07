@@ -1,0 +1,232 @@
+these one here i just copy pasted code snippets from github tests repos and dropped them here
+they could really make strong brainstormers
+
+# backend/tests/conftest.py
+from collections.abc import Generator
+import pytest
+from sqlmodel import Session, delete
+from app.core.config import settings
+from app.main import app
+from app.models import User
+from tests.utils.user import get_normal_user_token_headers
+from tests.utils.utils import get_admin_user_token_headers
+
+# Test database URL (in-memory SQLite for speed)
+TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
+
+@pytest.fixture(scope="session")
+def event_loop() -> Generator[asyncio.AbstractEventLoop, None, None]:
+    """
+    Create an event loop for the entire test session.
+    Required for async fixtures to work properly.
+    """
+    loop = asyncio.get_event_loop_policy().new_event_loop()
+    yield loop
+    loop.close()
+
+@pytest.fixture(scope="function")
+async def db(test_engine) -> AsyncGenerator[AsyncSession, None]:
+    """
+    Provide a clean database session for each test.
+    Automatically rolls back after each test to ensure isolation.
+    """
+    async_session_maker = async_sessionmaker(
+        test_engine, class_=AsyncSession, expire_on_commit=False
+    )
+
+    async with async_session_maker() as session:
+        yield session
+
+@pytest.fixture(scope="function")
+async def test_engine():
+    """
+    Create a fresh test database engine for each test.
+    Uses in-memory SQLite for blazing fast tests.
+    """
+    engine = create_async_engine(
+        TEST_DATABASE_URL,
+        echo=False,
+        future=True,
+        connect_args={"check_same_thread": False},
+    )
+
+    # Create all tables
+    async with engine.begin() as conn:
+        await conn.run_sync(SQLModel.metadata.create_all)
+
+    yield engine
+
+    # Cleanup: drop all tables
+    async with engine.begin() as conn:
+        await conn.run_sync(SQLModel.metadata.drop_all)
+
+    await engine.dispose()
+
+async def client(session: AsyncSession) -> AsyncGenerator[AsyncClient, None]:
+    """
+    This client:
+    - Uses the test database instead of production
+    - Provides a clean slate for each test
+    """
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        yield ac
+
+@pytest.fixture(scope="module")
+def admin_user_token_headers(client: TestClient) -> dict[str, str]:
+    return get_admin_user_token_headers(client)
+
+@pytest.fixture(scope="module")
+def normal_user_token_headers(client: TestClient) -> dict[str, str]:
+    return get_normal_user_token_headers(client)
+
+# backend/tests/utils.py/utils.py
+def random_lower_string() -> str:
+    return "".join(random.choices(string.ascii_lowercase, k=32))
+
+def random_email() -> str:
+    return f"{random_lower_string()}@{random_lower_string()}.com"
+
+@pytest.fixture(scope="function")
+def get_admin_user_token_headers(client: AsyncClient) -> dict[str, str]:
+    """Generate JWT token for admin user."""
+    login_data = {
+        "username": settings.ADMIN,
+        "password": settings.ADMIN_PASSWORD,
+    }
+    response = client.post(f"{settings.API_V1_STR}/login/access-token", data=login_data)
+    tokens = response.json()
+    access_token = tokens["access_token"]
+    headers = {"Authorization": f"Bearer {access_token}"}
+    return headers
+
+# backend/tests/routes/test_users_routes.py
+pytestmark = pytest.mark.integration
+@pytest.mark.crud
+class TestCurrentUserCreate:
+    pass
+
+class TestCurrentUserRead:
+    """Test current user profile retrieval."""
+    async def test_get_current_user_profile(self, client: AsyncClient, admin_token_headers: dict[str, str]):
+        """User can retrieve their own profile."""
+        response = await client.get(f"{settings.API_V1_STR}/users/me", headers=admin_token_headers)
+        assert response.status_code == 200
+        current_user = response.json()
+        assert current_user
+        assert current_user["is_active"] is True
+        assert current_user["role"] is "admin"
+        assert current_user["email"] == settings.ADMIN
+
+
+    async def test_get_users_normal_user_me(
+        client: AsyncClient, normal_user_token_headers: dict[str, str]
+    ) -> None:
+        response = client.get(f"{settings.API_V1_STR}/users/me", headers=normal_user_token_headers)
+        current_user = response.json()
+        assert current_user
+        assert current_user["is_active"] is True
+        assert current_user["is_superuser"] is False
+        assert current_user["email"] == settings.EMAIL_TEST_USER
+
+    async def test_get_current_user_unauthenticated(self, client: AsyncClient):
+        """Unauthenticated users cannot access profile."""
+        response = await client.get(f"{settings.API_V1_STR}/users/me")
+
+class TestCurrentUserUpdate:
+    async def test_update_user_me(
+            client: AsyncClient, normal_user_token_headers: dict[str, str], db: AsyncSession
+        ) -> None:
+        full_name, email = "Updated Name", random_email()
+        data = {"full_name": full_name, "email": email}
+        r = client.patch(
+            f"{settings.API_V1_STR}/users/me",
+            headers=normal_user_token_headers,
+            json=data,
+        )
+        assert r.status_code == 200
+        updated_user = r.json()
+        assert updated_user["email"] == email
+        assert updated_user["full_name"] == full_name
+        user_query = select(User).where(User.email == email)
+        user_db = db.execute(user_query).first()
+        assert user_db
+        assert user_db.email == email
+        assert user_db.full_name == full_name
+
+    async def test_update_user(
+        client: AsyncClient, admin_token_headers: dict[str, str], session: AsyncSession
+    ) -> None:
+        username = random_email()
+        password = random_lower_string()
+        user_in = UserCreate(email=username, password=password)
+        repo = UserRepo(session)
+        user = await repo.create_user(user_create=user_in)
+
+        data = {"full_name": "Updated_full_name"}
+        r = client.patch(
+            f"{settings.API_V1_STR}/users/{user.id}",
+            headers=admin_token_headers,
+            json=data,
+        )
+        assert r.status_code == 200
+        updated_user = r.json()
+        assert updated_user["full_name"] == "Updated_full_name"
+        user_query = select(User).where(User.email == username)
+        user_db = session.execute(user_query).first()
+        session.refresh(user_db)
+        assert user_db
+        assert user_db.full_name == "Updated_full_name"
+
+
+class TestCurrentUserDelete:
+    async def test_delete_user_me_as_admin(
+        client: AsyncClient, admin_token_headers: dict[str, str]
+    ) -> None:
+        r = client.delete(
+            f"{settings.API_V1_STR}/users/me",
+            headers=admin_token_headers,
+        )
+        assert r.status_code == 403
+        response = r.json()
+        assert response["detail"] == "Super users are not allowed to delete themselves"
+
+
+    async def test_delete_user_by_admin(
+        client: AsyncClient, superuser_token_headers: dict[str, str], session: asyncSession
+    ) -> None:
+        username = random_email()
+        password = random_lower_string()
+        user_in = UserCreate(email=username, password=password)
+        repo = UserRepo(session=session)
+        user = repo.create_user(user_create=user_in)
+        user_id = user.id
+        r = client.delete(
+            f"{settings.API_V1_STR}/users/{user_id}",
+            headers=superuser_token_headers,
+        )
+        assert r.status_code == 200
+        deleted_user = r.json()
+        assert deleted_user["message"] == "User deleted successfully"
+        result = await session.execute(select(User).where(User.id == user_id)).first()
+        assert result is None
+
+#backend/tests/utils/address.py
+async def create_random_address(db: asyncsession) -> Address:
+    user = create_random_user(db)
+    owner_id = user.id
+    assert owner_id is not None
+    address_in = AddressCreate()
+    return repo.create_address()
+
+#backend/tests/utils/users.py
+def user_authentication_headers(
+    *, client: TestClient, email: str, password: str
+) -> dict[str, str]:
+    data = {"username": email, "password": password}
+
+    r = client.post(f"{settings.API_V1_STR}/login/access-token", data=data)
+    response = r.json()
+    auth_token = response["access_token"]
+    headers = {"Authorization": f"Bearer {auth_token}"}
+    return headers

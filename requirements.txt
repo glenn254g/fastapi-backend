@@ -1,4 +1,12 @@
 fastapi
 uvicorn
 gunicorn
+python-dotenv
+pydantic-settings
+sqlalchemy
+alembic
+passlib[bcrypt]
+bcrypt
+python-jose[cryptography]
+email-validator
 sentry-sdk
